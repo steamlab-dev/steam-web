@@ -1,0 +1,64 @@
+{
+  "name": "@fcastrocs/steamweb",
+  "version": "1.0.0",
+  "description": "Interact with steamcommunity.com.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.cts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "steam",
+    "steamcommunity",
+    "steam api",
+    "steam web"
+  ],
+  "scripts": {
+    "postinstall": "test -f .git/config && husky || true",
+    "dev": "tsx watch src/index.ts",
+    "type-check": "tsc",
+    "check": "biome check .",
+    "fix": "biome check --write .",
+    "test": "vitest --run",
+    "test:coverage": "vitest --run --coverage --exclude '**/*.integration.test.ts'",
+    "test:integration": "vitest --run --config vitest.integration.config.ts",
+    "build": "tsdown",
+    "prepublishOnly": "npm run build"
+  },
+  "lint-staged": {
+    "*.{ts,js,json,md}": [
+      "biome check --write --no-errors-on-unmatched"
+    ]
+  },
+  "author": "Francisco Castro",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fcastrocs/steam-web.git"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "node-fetch": "^3.2.10"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.8",
+    "@types/node": "^25.5.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "dotenv": "^16.0.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "tsdown": "^0.21.4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
