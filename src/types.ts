@@ -74,18 +74,6 @@ export interface InventoryResponse {
   >;
 }
 
-export interface FinalizeloginRes {
-  steamID: string;
-  redir: string;
-  transfer_info: Array<{
-    url: string;
-    params: { nonce: string; auth: string };
-  }>;
-  primary_domain: string;
-  success?: boolean;
-  error?: number;
-}
-
 export interface Payload {
   iss: string;
   sub: string;

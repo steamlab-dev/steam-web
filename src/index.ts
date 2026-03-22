@@ -10,7 +10,6 @@ import type {
   AvatarUploadResponse,
   FarmableGame,
   FetchOptions,
-  FinalizeloginRes,
   InventoryResponse,
   ISteamWeb,
   Item,
@@ -24,7 +23,6 @@ export type {
   AvatarUploadResponse,
   FarmableGame,
   FetchOptions,
-  FinalizeloginRes,
   InventoryResponse,
   ISteamWeb,
   Item,
@@ -45,8 +43,6 @@ export const ERRORS = {
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36";
-const LOGIN_REDIRECT_URL =
-  "https://store.steampowered.com/login/?redir=&redir_ssl=1&snr=1_4_4__global-header";
 const GENERATE_ACCESS_TOKEN_URL =
   "https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1";
 
@@ -70,7 +66,6 @@ export class SteamWeb implements ISteamWeb {
     this.sessionid = session.sessionid;
     this.steamid = session.steamid;
     this.fetchOptions.headers.set("Cookie", session.cookies);
-    await this.verifyLoggedIn();
   }
 
   /** Log into Steamcommunity.com with a JWT access or refresh token. */
@@ -89,69 +84,6 @@ export class SteamWeb implements ISteamWeb {
     };
   }
 
-  /**
-   * Complete the older refresh-token flow that exchanges transfer_info into web cookies.
-   * The current public login path uses GenerateAccessTokenForApp instead.
-   */
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Retained for internal fallback flow and direct unit coverage.
-  private async loginWithRefreshToken(refreshToken: string): Promise<void> {
-    this.refreshToken = refreshToken;
-    let form = new FormData();
-    form.append("nonce", refreshToken);
-    form.append("sessionid", this.sessionid);
-    form.append("redir", LOGIN_REDIRECT_URL);
-
-    const finalizeLoginRes = await this.fetchJson<FinalizeloginRes>(
-      "https://login.steampowered.com/jwt/finalizelogin",
-      {
-        body: form,
-        method: "POST",
-      },
-    );
-    if (finalizeLoginRes.success === false) {
-      throw finalizeLoginRes.error;
-    }
-
-    // One transfer target is enough to bootstrap the auth cookies shared across Steam domains.
-    const transfer = finalizeLoginRes.transfer_info[0];
-    if (!transfer) {
-      throw new SteamWebError("SomethingWentWrong");
-    }
-
-    form = new FormData();
-    form.append("nonce", transfer.params.nonce);
-    form.append("auth", transfer.params.auth);
-    form.append("steamID", this.steamid);
-
-    const transferResponse = await this.fetchImpl(transfer.url, {
-      ...this.fetchOptions,
-      body: form,
-      method: "POST",
-    });
-    this.validateRes(transferResponse);
-
-    const transferBody = (await transferResponse.json()) as { result: number };
-    if (transferBody.result !== 1) {
-      throw transferBody.result;
-    }
-
-    const cookies = transferResponse.headers.get("set-cookie");
-
-    if (!cookies?.includes("steamLoginSecure")) {
-      throw new SteamWebError("SomethingWentWrong");
-    }
-
-    this.setCookie("sessionid", this.sessionid);
-    this.setCookieHeader(cookies);
-  }
-
-  /** Store an access token directly as the Steam auth cookie. */
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Retained for explicit access-token cookie flow coverage.
-  private async loginWithAccessToken(accessToken: string): Promise<void> {
-    const value = encodeURI(`${this.steamid}||${accessToken}`);
-    this.setCookie("steamLoginSecure", value);
-  }
-
   private async generateAccessTokenForApp(): Promise<void> {
     const params = new URLSearchParams({
       access_token: this.refreshToken,
@@ -166,11 +98,6 @@ export class SteamWeb implements ISteamWeb {
     this.setCookieHeader(response.headers.get("set-cookie"));
   }
 
-  /** Placeholder for a lightweight authenticated ping if the login flow needs stricter validation later. */
-  private async verifyLoggedIn(): Promise<void> {
-    return Promise.resolve();
-  }
-
   /** Clear the current Steam web session. */
   async logout(): Promise<void> {
     const form = new FormData();
@@ -183,10 +110,8 @@ export class SteamWeb implements ISteamWeb {
     this.fetchOptions.headers.set("Cookie", "");
   }
 
-  private verifyToken(token: string): { payload: Payload; tokenType: "access" | "refresh" } {
+  private verifyToken(token: string): { payload: Payload } {
     try {
-      let tokenType: "access" | "refresh";
-
       const encodedPayload = token.split(".")[1];
       if (!encodedPayload) {
         throw new SteamWebError(ERRORS.INVALID_TOKEN);
@@ -194,12 +119,6 @@ export class SteamWeb implements ISteamWeb {
 
       const buff = Buffer.from(encodedPayload, "base64");
       const payload = JSON.parse(buff.toString("utf8")) as Payload;
-
-      if (payload.aud.includes("renew")) {
-        tokenType = "refresh";
-      } else {
-        tokenType = "access";
-      }
 
       if (!payload.aud.includes("web")) {
         throw new SteamWebError("Token audience is not valid for web.");
@@ -213,7 +132,7 @@ export class SteamWeb implements ISteamWeb {
         throw new SteamWebError(ERRORS.TOKEN_EXPIRED);
       }
 
-      return { payload, tokenType };
+      return { payload };
     } catch (error) {
       if (
         error instanceof SteamWebError ||
