@@ -34,23 +34,18 @@ const session = await steamWeb.login(token);
 
 ```javascript
 import SteamWeb from "@machiavelli/steam-web";
+import { ProxyAgent } from "undici";
 
-const info = {
-  hostname: "br41.nordvpn.com",
-  userId: "your-name@gmail.com",
-  password: "abcdef12345124",
-};
-const agent = new SocksProxyAgent(info);
+const dispatcher = new ProxyAgent("http://user:password@proxy-host:8080");
 
-const steamWeb = new SteamWeb({ agent });
-cosnt session = await steamWeb.login(token);
+const steamWeb = new SteamWeb({ dispatcher });
+const session = await steamWeb.login(token);
 ```
 
 ### Re-use previous session to skip login
 
 ```javascript
 import SteamWeb from "@machiavelli/steam-web";
-import { SocksProxyAgent } from "socks-proxy-agent";
 
 // session is returned by login()
 const steamWeb = new SteamWeb();

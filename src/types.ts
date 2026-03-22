@@ -1,6 +1,3 @@
-import type { Agent } from "node:http";
-import type { Headers } from "node-fetch";
-
 export interface ISteamWeb {
   setSession(session: Session): Promise<void>;
   login(token: string): Promise<Session>;
@@ -14,11 +11,11 @@ export interface ISteamWeb {
 }
 
 export interface Options {
-  agent?: Agent;
+  dispatcher?: RequestInit["dispatcher"];
 }
 
 export interface FetchOptions {
-  agent?: Agent;
+  dispatcher?: RequestInit["dispatcher"];
   headers: Headers;
 }
 

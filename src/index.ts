@@ -1,8 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { URLSearchParams } from "node:url";
 import { load } from "cheerio";
-import type { BodyInit, Response } from "node-fetch";
-import fetch, { Headers } from "node-fetch";
 import SteamWebError from "./SteamWebError.js";
 import type {
   AvatarUploadResponse,
@@ -57,8 +55,8 @@ export default class SteamWeb implements ISteamWeb {
     this.fetchOptions.headers.set("User-Agent", userAgent);
     this.fetchOptions.headers.set("Cookie", "");
 
-    if (this.options?.agent) {
-      this.fetchOptions.agent = this.options.agent;
+    if (this.options?.dispatcher) {
+      this.fetchOptions.dispatcher = this.options.dispatcher;
     }
   }
 
@@ -118,7 +116,7 @@ export default class SteamWeb implements ISteamWeb {
     // get transfer_info
     const finalizeLoginRes = await fetch("https://login.steampowered.com/jwt/finalizelogin", {
       ...this.fetchOptions,
-      body: form as BodyInit,
+      body: form,
       method: "POST",
     }).then(async (res) => {
       this.validateRes(res);
@@ -144,7 +142,7 @@ export default class SteamWeb implements ISteamWeb {
 
     const cookies = await fetch(transfer.url, {
       ...this.fetchOptions,
-      body: form as BodyInit,
+      body: form,
       method: "POST",
     }).then(async (res) => {
       this.validateRes(res);
@@ -220,7 +218,7 @@ export default class SteamWeb implements ISteamWeb {
     await fetch("https://store.steampowered.com/logout/", {
       ...this.fetchOptions,
       method: "POST",
-      body: form as BodyInit,
+      body: form,
     });
     this.fetchOptions.headers.set("Cookie", "");
   }
@@ -403,7 +401,7 @@ export default class SteamWeb implements ISteamWeb {
     form.append("doSub", "1");
     form.append("json", "1");
 
-    res = await fetch(url, { ...this.fetchOptions, method: "POST", body: form as BodyInit });
+    res = await fetch(url, { ...this.fetchOptions, method: "POST", body: form });
     this.validateRes(res);
     const text = await res.text();
 
@@ -427,7 +425,7 @@ export default class SteamWeb implements ISteamWeb {
     const res = await fetch(url, {
       ...this.fetchOptions,
       method: "POST",
-      body: params as BodyInit,
+      body: params,
     });
     this.validateRes(res);
     const text = await res.text();
@@ -464,7 +462,7 @@ export default class SteamWeb implements ISteamWeb {
     form.append("Privacy", JSON.stringify(settings));
     form.append("eCommentPermission", "1");
 
-    const res = await fetch(url, { ...this.fetchOptions, method: "POST", body: form as BodyInit });
+    const res = await fetch(url, { ...this.fetchOptions, method: "POST", body: form });
     this.validateRes(res);
 
     const text = await res.text();

@@ -46,8 +46,7 @@
     "url": "https://github.com/fcastrocs/steam-web.git"
   },
   "dependencies": {
-    "cheerio": "^1.0.0-rc.12",
-    "node-fetch": "^3.2.10"
+    "cheerio": "^1.0.0-rc.12"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",
