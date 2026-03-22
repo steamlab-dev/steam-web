@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { URLSearchParams } from "node:url";
-import { load } from "cheerio";
+import {
+  parseAvatarFrameFromProfileHtml,
+  parseFarmableGamesFromBadgesHtml,
+} from "./internal/html-parsers";
 import SteamWebError from "./SteamWebError.js";
 import type {
   AvatarUploadResponse,
@@ -39,8 +42,12 @@ export const ERRORS = {
   INVALID_TOKEN: "InvalidToken",
 } as const;
 
-const userAgent =
+const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36";
+const LOGIN_REDIRECT_URL =
+  "https://store.steampowered.com/login/?redir=&redir_ssl=1&snr=1_4_4__global-header";
+const GENERATE_ACCESS_TOKEN_URL =
+  "https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1";
 
 export default class SteamWeb implements ISteamWeb {
   private steamid = "";
@@ -51,8 +58,7 @@ export default class SteamWeb implements ISteamWeb {
   private refreshToken = "";
 
   constructor(private readonly options?: Options) {
-    // set default headers
-    this.fetchOptions.headers.set("User-Agent", userAgent);
+    this.fetchOptions.headers.set("User-Agent", USER_AGENT);
     this.fetchOptions.headers.set("Cookie", "");
 
     if (this.options?.dispatcher) {
@@ -60,9 +66,7 @@ export default class SteamWeb implements ISteamWeb {
     }
   }
 
-  /**
-   * Re-use a previous session, thus we don't have to login again
-   */
+  /** Reuse a previously established Steam session. */
   async setSession(session: Session): Promise<void> {
     this.sessionid = session.sessionid;
     this.steamid = session.steamid;
@@ -70,26 +74,14 @@ export default class SteamWeb implements ISteamWeb {
     await this.verifyLoggedIn();
   }
 
-  /**
-   * Login to Steamcommunity.com
-   * token: access_token or refresh_token
-   */
+  /** Log into Steamcommunity.com with a JWT access or refresh token. */
   async login(token: string): Promise<Session> {
     const { payload } = this.verifyToken(token);
     this.steamid = payload.sub;
-
     this.refreshToken = token;
-    console.log(this.steamid);
 
+    // Steam sets the cookies we need as part of this app-token bootstrap call.
     await this.generateAccessTokenForApp();
-
-    // if (tokenType === "access") {
-    //   await this.loginWithAccessToken(token);
-    // } else if (tokenType === "refresh") {
-    //   await this.loginWithRefreshToken(token);
-    // }
-
-    //await this.verifyLoggedIn();
 
     return {
       cookies: this.fetchOptions.headers.get("Cookie") ?? "",
@@ -99,37 +91,28 @@ export default class SteamWeb implements ISteamWeb {
   }
 
   /**
-   * Login to steam with refresh_token
-   * (takes a bit longer than access_token login)
-   * @returns auth cookie
+   * Complete the older refresh-token flow that exchanges transfer_info into web cookies.
+   * The current public login path uses GenerateAccessTokenForApp instead.
    */
   private async loginWithRefreshToken(refreshToken: string): Promise<void> {
     this.refreshToken = refreshToken;
     let form = new FormData();
     form.append("nonce", refreshToken);
     form.append("sessionid", this.sessionid);
-    form.append(
-      "redir",
-      "https://store.steampowered.com/login/?redir=&redir_ssl=1&snr=1_4_4__global-header",
+    form.append("redir", LOGIN_REDIRECT_URL);
+
+    const finalizeLoginRes = await this.fetchJson<FinalizeloginRes>(
+      "https://login.steampowered.com/jwt/finalizelogin",
+      {
+        body: form,
+        method: "POST",
+      },
     );
+    if (finalizeLoginRes.success === false) {
+      throw finalizeLoginRes.error;
+    }
 
-    // get transfer_info
-    const finalizeLoginRes = await fetch("https://login.steampowered.com/jwt/finalizelogin", {
-      ...this.fetchOptions,
-      body: form,
-      method: "POST",
-    }).then(async (res) => {
-      this.validateRes(res);
-      const body = (await res.json()) as FinalizeloginRes;
-      if (body.success === false) {
-        throw body.error; // EResult
-      }
-
-      return body;
-    });
-
-    // the steam website makes requests to all three transfer_info items to setup auth cookies to all their domains and subdomains
-    // however we only need to make one request and we can use the auth cookies everywhere.
+    // One transfer target is enough to bootstrap the auth cookies shared across Steam domains.
     const transfer = finalizeLoginRes.transfer_info[0];
     if (!transfer) {
       throw new SteamWebError("SomethingWentWrong");
@@ -140,78 +123,54 @@ export default class SteamWeb implements ISteamWeb {
     form.append("auth", transfer.params.auth);
     form.append("steamID", this.steamid);
 
-    const cookies = await fetch(transfer.url, {
+    const transferResponse = await fetch(transfer.url, {
       ...this.fetchOptions,
       body: form,
       method: "POST",
-    }).then(async (res) => {
-      this.validateRes(res);
-
-      const body = (await res.json()) as { result: number };
-      if (body.result !== 1) {
-        throw body.result;
-      }
-
-      return res.headers.get("set-cookie");
     });
+    this.validateRes(transferResponse);
 
-    // headers['set-cookie'] must contain steamLoginSecure
+    const transferBody = (await transferResponse.json()) as { result: number };
+    if (transferBody.result !== 1) {
+      throw transferBody.result;
+    }
+
+    const cookies = transferResponse.headers.get("set-cookie");
+
     if (!cookies?.includes("steamLoginSecure")) {
-      console.log(cookies);
-      console.log(finalizeLoginRes);
       throw new SteamWebError("SomethingWentWrong");
     }
 
-    // making only one request to transfer
     this.setCookie("sessionid", this.sessionid);
     this.setCookieHeader(cookies);
   }
 
-  /**
-   * Login to steam with access_token
-   * @returns auth cookie
-   */
+  /** Store an access token directly as the Steam auth cookie. */
   private async loginWithAccessToken(accessToken: string): Promise<void> {
     const value = encodeURI(`${this.steamid}||${accessToken}`);
     this.setCookie("steamLoginSecure", value);
   }
 
   private async generateAccessTokenForApp(): Promise<void> {
-    await fetch(
-      `
-    https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1?key=5C97A7C241055E3A36E95B7EED8A66FC&access_token=${this.refreshToken}&steamid=${this.steamid}`,
-      {
-        ...this.fetchOptions,
-        method: "POST",
-      },
-    ).then(async (res) => {
-      console.log(res);
-      const body = await res.text();
-      console.log(body);
-      //    this.validateRes(res);
-      // set any cookies we might have gotten from this request (i.e sessionid, browserid)
-      this.setCookieHeader(res.headers.get("set-cookie"));
+    const params = new URLSearchParams({
+      access_token: this.refreshToken,
+      key: "5C97A7C241055E3A36E95B7EED8A66FC",
+      steamid: this.steamid,
     });
+    const response = await fetch(`${GENERATE_ACCESS_TOKEN_URL}?${params.toString()}`, {
+      ...this.fetchOptions,
+      method: "POST",
+    });
+
+    this.setCookieHeader(response.headers.get("set-cookie"));
   }
 
-  /**
-   * Low overhead call to verify we logged in successfully
-   */
+  /** Placeholder for a lightweight authenticated ping if the login flow needs stricter validation later. */
   private async verifyLoggedIn(): Promise<void> {
-    // await fetch(`
-    // https://api.steampowered.com/ISteamNotificationService/GetSteamNotifications/v1?access_token=`, {
-    //   ...this.fetchOptions,
-    // }).then(async (res) => {
-    //   console.log(res);
-    //   this.validateRes(res);
-    //   // set any cookies we might have gotten from this request (i.e sessionid, browserid)
-    //   this.setCookieHeader(res.headers.get("set-cookie"));
-    // });
+    return Promise.resolve();
   }
 
-  /**
-   * Logout and destroy cookies
-   */
+  /** Clear the current Steam web session. */
   async logout(): Promise<void> {
     const form = new FormData();
     form.append("sessionid", this.sessionid);
@@ -266,9 +225,7 @@ export default class SteamWeb implements ISteamWeb {
     }
   }
 
-  /**
-   * parse set-cookie header and set them to cookie header
-   */
+  /** Merge cookies from a Set-Cookie header into the shared Cookie header. */
   private setCookieHeader(strCookies: string | null): void {
     if (!strCookies) {
       return;
@@ -276,7 +233,6 @@ export default class SteamWeb implements ISteamWeb {
 
     const cookies = new Map<string, string>();
 
-    // set cookies into a map
     strCookies.split(",").forEach((c) => {
       const rawCookie = c.split("; Path")[0];
       if (!rawCookie) {
@@ -291,7 +247,6 @@ export default class SteamWeb implements ISteamWeb {
       cookies.set(name, value);
     });
 
-    // set cookies to header
     for (const [name, value] of cookies) {
       this.setCookie(name, value);
 
@@ -301,9 +256,7 @@ export default class SteamWeb implements ISteamWeb {
     }
   }
 
-  /**
-   * set a cookie to header
-   */
+  /** Prepend a cookie value so later writes override older ones by name. */
   private setCookie(name: string, value: string): void {
     const cookie = `${name}=${value}`;
     let cookies = this.fetchOptions.headers.get("Cookie") ?? "";
@@ -311,54 +264,24 @@ export default class SteamWeb implements ISteamWeb {
     this.fetchOptions.headers.set("Cookie", cookies);
   }
 
-  /**
-   * Get games with cards left to farm
-   */
+  /** Return games that still have Steam trading cards left to drop. */
   async getFarmableGames(): Promise<FarmableGame[]> {
     const url = `https://steamcommunity.com/profiles/${this.steamid}/badges`;
-
-    const res = await fetch(url, this.fetchOptions).then((res) => {
-      this.validateRes(res);
-      return res.text();
-    });
-
-    const data: FarmableGame[] = this.parseFarmingData(res);
-    return data;
+    const html = await this.fetchText(url);
+    return this.parseFarmingData(html);
   }
 
-  /**
-   * Get avatar frame
-   */
+  /** Return the current profile avatar frame image URL if one exists. */
   async getAvatarFrame(): Promise<string | null> {
     const url = `https://steamcommunity.com/profiles/${this.steamid}`;
-
-    const res = await fetch(url, this.fetchOptions).then((res) => {
-      this.validateRes(res);
-      return res.text();
-    });
-
-    const $ = load(res);
-
-    const frameHTML = $(".profile_avatar_frame");
-
-    if (!frameHTML.length) {
-      return null;
-    }
-
-    return frameHTML.first().find("img").attr("src") ?? null;
+    return parseAvatarFrameFromProfileHtml(await this.fetchText(url));
   }
 
-  /**
-   * Get cards inventory
-   */
+  /** Return the current trading card inventory. */
   async getCardsInventory(): Promise<Item[]> {
     const contextId = "6"; // trading cards
     const url = `https://steamcommunity.com/profiles/${this.steamid}/inventory/json/753/${contextId}`;
-
-    const data = await fetch(url, this.fetchOptions).then((res) => {
-      this.validateRes(res);
-      return res.json() as unknown as InventoryResponse;
-    });
+    const data = await this.fetchJson<InventoryResponse>(url);
 
     if (!data.success) {
       if (data.Error === "This profile is private.") {
@@ -372,18 +295,14 @@ export default class SteamWeb implements ISteamWeb {
     return items;
   }
 
-  /**
-   * Change account profile avatar
-   */
+  /** Upload a new profile avatar from a remote JPEG or PNG URL. */
   async changeAvatar(avatarURL: string): Promise<string> {
-    // validate image first
     let res = await fetch(avatarURL, { method: "HEAD" });
-    // only allow jpeg and png
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("image/jpeg") && !contentType.includes("image/png")) {
       throw new SteamWebError("URL does not contain a JPEG or PNG image.");
     }
-    // size should not be larger than 1024 kB
+
     if (Number.parseInt(res.headers.get("content-length") ?? "0", 10) / 1024 > 1024) {
       throw new SteamWebError("Image size should not be larger than 1024 kB.");
     }
@@ -413,30 +332,20 @@ export default class SteamWeb implements ISteamWeb {
     return json.images.full;
   }
 
-  /**
-   * Clear account's previous aliases
-   */
+  /** Clear the account's alias history. */
   async clearAliases(): Promise<void> {
     const url = `https://steamcommunity.com/profiles/${this.steamid}/ajaxclearaliashistory/`;
 
     const params = new URLSearchParams();
     params.append("sessionid", this.sessionid);
 
-    const res = await fetch(url, {
-      ...this.fetchOptions,
-      method: "POST",
-      body: params,
-    });
-    this.validateRes(res);
-    const text = await res.text();
+    const text = await this.fetchText(url, { body: params, method: "POST" });
     if (!text.includes('{"success":1')) {
       throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
     }
   }
 
-  /**
-   * Change account's privacy settings
-   */
+  /** Update profile visibility while keeping related privacy flags public. */
   async changePrivacy(privacy: ProfilePrivacy): Promise<void> {
     const url = `https://steamcommunity.com/profiles/${this.steamid}/ajaxsetprivacy/`;
 
@@ -462,13 +371,28 @@ export default class SteamWeb implements ISteamWeb {
     form.append("Privacy", JSON.stringify(settings));
     form.append("eCommentPermission", "1");
 
-    const res = await fetch(url, { ...this.fetchOptions, method: "POST", body: form });
-    this.validateRes(res);
-
-    const text = await res.text();
+    const text = await this.fetchText(url, { body: form, method: "POST" });
     if (!text.includes('{"success":1')) {
       throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
     }
+  }
+
+  private async fetchText(
+    url: string,
+    init?: Omit<RequestInit, "dispatcher" | "headers">,
+  ): Promise<string> {
+    const response = await fetch(url, { ...this.fetchOptions, ...init });
+    this.validateRes(response);
+    return response.text();
+  }
+
+  private async fetchJson<T>(
+    url: string,
+    init?: Omit<RequestInit, "dispatcher" | "headers">,
+  ): Promise<T> {
+    const response = await fetch(url, { ...this.fetchOptions, ...init });
+    this.validateRes(response);
+    return (await response.json()) as T;
   }
 
   private parseItems(data: InventoryResponse, contextId: string): Item[] {
@@ -500,111 +424,33 @@ export default class SteamWeb implements ISteamWeb {
       });
     }
     return items;
+    /** Preserve the public error type while delegating the badge-page parsing work. */
   }
 
   private parseFarmingData(html: string): FarmableGame[] {
-    const $ = load(html);
+    try {
+      return parseFarmableGamesFromBadgesHtml(html);
+    } catch (error) {
+      if (error instanceof Error && error.message === ERRORS.NOT_LOGGEDIN) {
+        throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
+      }
 
-    // check if cookie expired
-    if ($(".global_action_link").first().text().includes("login")) {
-      throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
+      throw error;
     }
-
-    const FarmableGame: FarmableGame[] = [];
-
-    $(".badge_row").each((_index, badge) => {
-      let playTime = 0;
-      let remainingCards = 0;
-      let name = "";
-      let appId = 0;
-      let droppedCards = 0;
-
-      // check for remaining cards
-      const progress = $(badge).find(".progress_info_bold");
-      if (!progress) {
-        return;
-      }
-
-      const remainingCardsText = progress.text();
-      // can also include "tasks remaining"
-      if (!remainingCardsText.includes("card")) {
-        return;
-      }
-
-      const remainingCardsMatch = remainingCardsText.match(/\d+/)?.[0];
-      if (!remainingCardsMatch) {
-        return;
-      }
-
-      remainingCards = Number(remainingCardsMatch);
-      if (remainingCards === 0) {
-        return;
-      }
-
-      // Get play time
-      let playTimeText = $(badge).find(".badge_title_stats_playtime").text();
-      if (!playTimeText) {
-        return;
-      }
-
-      if (playTimeText.includes("hrs on record")) {
-        // hrs could be displayed as x,xxx format or xx.xx
-        playTimeText = playTimeText.replace(",", "");
-        const playTimeMatch = playTimeText.match(/\d+(\.\d+)?/g)?.[0];
-        playTime = playTimeMatch ? Number(playTimeMatch) : 0;
-      }
-
-      // Get game title
-      // remove details first...
-      $(badge).find(".badge_view_details").remove();
-      name = $(badge)
-        .find(".badge_title")
-        .text()
-        .replace(/&nbsp;/, "")
-        .trim();
-
-      // Get appID
-      let link = $(badge).find(".badge_row_overlay").attr("href");
-      if (!link) {
-        return;
-      }
-
-      link = link.substring(link.indexOf("gamecards"), link.length);
-      const appIdMatch = link.match(/\d+/)?.[0];
-      if (!appIdMatch) {
-        return;
-      }
-
-      appId = Number(appIdMatch);
-
-      // Get dropped cards
-      $(badge)
-        .find(".card_drop_info_header")
-        .each((_index, header) => {
-          const text = $(header).text();
-          if (text.includes("Card drops received")) {
-            const droppedCardsMatch = text.match(/\d+(\.\d+)?/g)?.[0];
-            droppedCards = droppedCardsMatch ? Number(droppedCardsMatch) : 0;
-            return;
-          }
-        });
-
-      FarmableGame.push({ name, appId, playTime, remainingCards, droppedCards });
-    });
-    return FarmableGame;
   }
 
-  private validateRes(res: Response) {
-    if (res.status === 429) {
+  /** Normalize common Steam HTTP failures into the library's public error contract. */
+  private validateRes(response: Response) {
+    if (response.status === 429) {
       throw new SteamWebError(ERRORS.RATE_LIMIT);
     }
 
-    if (res.status === 401) {
+    if (response.status === 401) {
       throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
     }
 
-    if (!res.ok) {
-      throw res;
+    if (!response.ok) {
+      throw response;
     }
   }
 }

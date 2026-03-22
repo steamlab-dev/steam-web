@@ -8,7 +8,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!dist", "!coverage", "!.tsdown"]
+    "includes": ["**", "!dist", "!coverage", "!.tsdown", "!tests/fixtures/**/*.html"]
   },
   "formatter": {
     "enabled": true,

@@ -6,6 +6,7 @@ export default defineConfig({
     globals: true,
     exclude: [...configDefaults.exclude, "**/*.integration.test.ts"],
     coverage: {
+      exclude: ["src/types.ts"],
       include: ["src/**/*.ts"],
     },
   },

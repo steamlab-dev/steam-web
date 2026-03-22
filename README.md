@@ -1,104 +1,89 @@
 # steam-web
 
-steam-web is a Node.js module to interact with steamcommunity.com. It provides an easy API to important account data that is otherwise hard to obtain programmatically without scraping it.
+`steam-web` is a small Node.js client for Steam Community account workflows that do not have a convenient public API surface.
+
+It supports JWT-based login, session reuse, profile and inventory operations, and badge-page parsing for trading-card farming data.
+
+## Requirements
+
+- Node.js 22+
 
 ## Installation
 
 ```sh
-npm i @machiavelli/steam-web
+npm i @fcastrocs/steamweb
 ```
 
 ## Features
 
-- New steam login support (JWT)
-- Login using access_token.
-- Login using refresh_token.
-- Re-use previous session.
-- Proxy support.
+- JWT login with Steam web tokens
+- Session reuse without logging in again
+- Optional Undici dispatcher support for proxies or custom transports
+- Trading card farming detection from the badges page
+- Trading card inventory fetching
+- Avatar, alias-history, and privacy management helpers
 
 ## Usage
 
-### connect directly
+### Login
 
-```javascript
-import SteamWeb from "@machiavelli/steam-web";
+```ts
+import SteamWeb from "@fcastrocs/steamweb";
 
-// these tokens are obtainable through the steam-client
-const token = access_token || refresh_token;
+const token = process.env.STEAM_WEB_REFRESH_TOKEN!;
 
 const steamWeb = new SteamWeb();
 const session = await steamWeb.login(token);
 ```
 
-### connect through proxy
+### Use a proxy or custom Undici dispatcher
 
-```javascript
-import SteamWeb from "@machiavelli/steam-web";
+```ts
+import SteamWeb from "@fcastrocs/steamweb";
 import { ProxyAgent } from "undici";
 
 const dispatcher = new ProxyAgent("http://user:password@proxy-host:8080");
-
 const steamWeb = new SteamWeb({ dispatcher });
-const session = await steamWeb.login(token);
+
+await steamWeb.login(process.env.STEAM_WEB_REFRESH_TOKEN!);
 ```
 
-### Re-use previous session to skip login
+### Reuse an existing session
 
-```javascript
-import SteamWeb from "@machiavelli/steam-web";
+```ts
+import SteamWeb from "@fcastrocs/steamweb";
 
-// session is returned by login()
 const steamWeb = new SteamWeb();
-await steamWeb.setSession(session);
+
+await steamWeb.setSession({
+  cookies: "steamLoginSecure=...; sessionid=...;",
+  sessionid: "...",
+  steamid: "7656119...",
+});
 ```
 
-## Methods
+### Read farmable games and avatar frame
 
-```javascript
-  /**
-   * Re-use a previous session, thus we don't have to login again
-   */
-  setSession(session: Session): Promise<void>;
-
-  /**
-   * Login to Steamcommunity.com
-   * token: access_token or refresh_token
-   */
-  login(token: string): Promise<Session>;
-
-  /**
-   * Logout and destroy cookies
-   */
-  logout(): Promise<void>;
-
-  /**
-   * Get games with cards left to farm
-   */
-  getFarmableGames(): Promise<FarmableGame[]>;
-
-  /**
-   * Get cards inventory
-   */
-  getCardsInventory(): Promise<Item[]>;
-
-  /**
-   * Change account profile avatar
-   */
-  changeAvatar(avatarURL: string): Promise<string>;
-
-  /**
-   * Clear account's previous aliases
-   */
-  clearAliases(): Promise<void>;
-
-  /**
-   * Change account's privacy settings
-   */
-  changePrivacy(privacy: ProfilePrivacy): Promise<void>;
-
-  /**
-   * Get avatar frame
-   */
-  getAvatarFrame(): Promise<string>
-
+```ts
+const farmableGames = await steamWeb.getFarmableGames();
+const avatarFrame = await steamWeb.getAvatarFrame();
 ```
+
+## API
+
+```ts
+setSession(session: Session): Promise<void>;
+login(token: string): Promise<Session>;
+logout(): Promise<void>;
+getFarmableGames(): Promise<FarmableGame[]>;
+getCardsInventory(): Promise<Item[]>;
+changeAvatar(avatarURL: string): Promise<string>;
+clearAliases(): Promise<void>;
+changePrivacy(privacy: ProfilePrivacy): Promise<void>;
+getAvatarFrame(): Promise<string | null>;
+```
+
+## Notes
+
+- `getFarmableGames()` depends on the current Steam badges page HTML, so parser adjustments may be needed when Steam changes markup.
+- Integration tests require `STEAM_WEB_REFRESH_TOKEN` to be set in the environment.
