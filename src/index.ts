@@ -4,6 +4,7 @@ import {
   parseAvatarFrameFromProfileHtml,
   parseFarmableGamesFromBadgesHtml,
 } from "./internal/html-parsers";
+import { createFetch } from "./internal/proxy";
 import SteamWebError from "./SteamWebError.js";
 import type {
   AvatarUploadResponse,
@@ -49,21 +50,19 @@ const LOGIN_REDIRECT_URL =
 const GENERATE_ACCESS_TOKEN_URL =
   "https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1";
 
-export default class SteamWeb implements ISteamWeb {
+export class SteamWeb implements ISteamWeb {
   private steamid = "";
   private sessionid = randomBytes(12).toString("hex");
+  private readonly fetchImpl: typeof fetch;
   private fetchOptions: FetchOptions = {
     headers: new Headers(),
   };
   private refreshToken = "";
 
   constructor(private readonly options?: Options) {
+    this.fetchImpl = createFetch(this.options?.proxyUrl);
     this.fetchOptions.headers.set("User-Agent", USER_AGENT);
     this.fetchOptions.headers.set("Cookie", "");
-
-    if (this.options?.dispatcher) {
-      this.fetchOptions.dispatcher = this.options.dispatcher;
-    }
   }
 
   /** Reuse a previously established Steam session. */
@@ -94,6 +93,7 @@ export default class SteamWeb implements ISteamWeb {
    * Complete the older refresh-token flow that exchanges transfer_info into web cookies.
    * The current public login path uses GenerateAccessTokenForApp instead.
    */
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Retained for internal fallback flow and direct unit coverage.
   private async loginWithRefreshToken(refreshToken: string): Promise<void> {
     this.refreshToken = refreshToken;
     let form = new FormData();
@@ -123,7 +123,7 @@ export default class SteamWeb implements ISteamWeb {
     form.append("auth", transfer.params.auth);
     form.append("steamID", this.steamid);
 
-    const transferResponse = await fetch(transfer.url, {
+    const transferResponse = await this.fetchImpl(transfer.url, {
       ...this.fetchOptions,
       body: form,
       method: "POST",
@@ -146,6 +146,7 @@ export default class SteamWeb implements ISteamWeb {
   }
 
   /** Store an access token directly as the Steam auth cookie. */
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Retained for explicit access-token cookie flow coverage.
   private async loginWithAccessToken(accessToken: string): Promise<void> {
     const value = encodeURI(`${this.steamid}||${accessToken}`);
     this.setCookie("steamLoginSecure", value);
@@ -157,7 +158,7 @@ export default class SteamWeb implements ISteamWeb {
       key: "5C97A7C241055E3A36E95B7EED8A66FC",
       steamid: this.steamid,
     });
-    const response = await fetch(`${GENERATE_ACCESS_TOKEN_URL}?${params.toString()}`, {
+    const response = await this.fetchImpl(`${GENERATE_ACCESS_TOKEN_URL}?${params.toString()}`, {
       ...this.fetchOptions,
       method: "POST",
     });
@@ -174,7 +175,7 @@ export default class SteamWeb implements ISteamWeb {
   async logout(): Promise<void> {
     const form = new FormData();
     form.append("sessionid", this.sessionid);
-    await fetch("https://store.steampowered.com/logout/", {
+    await this.fetchImpl("https://store.steampowered.com/logout/", {
       ...this.fetchOptions,
       method: "POST",
       body: form,
@@ -297,7 +298,7 @@ export default class SteamWeb implements ISteamWeb {
 
   /** Upload a new profile avatar from a remote JPEG or PNG URL. */
   async changeAvatar(avatarURL: string): Promise<string> {
-    let res = await fetch(avatarURL, { method: "HEAD" });
+    let res = await this.fetchImpl(avatarURL, { method: "HEAD" });
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("image/jpeg") && !contentType.includes("image/png")) {
       throw new SteamWebError("URL does not contain a JPEG or PNG image.");
@@ -307,7 +308,7 @@ export default class SteamWeb implements ISteamWeb {
       throw new SteamWebError("Image size should not be larger than 1024 kB.");
     }
 
-    const blob = await fetch(avatarURL).then((res) => res.blob());
+    const blob = await this.fetchImpl(avatarURL).then((res) => res.blob());
     const url = "https://steamcommunity.com/actions/FileUploader/";
 
     const form = new FormData();
@@ -320,7 +321,7 @@ export default class SteamWeb implements ISteamWeb {
     form.append("doSub", "1");
     form.append("json", "1");
 
-    res = await fetch(url, { ...this.fetchOptions, method: "POST", body: form });
+    res = await this.fetchImpl(url, { ...this.fetchOptions, method: "POST", body: form });
     this.validateRes(res);
     const text = await res.text();
 
@@ -377,20 +378,14 @@ export default class SteamWeb implements ISteamWeb {
     }
   }
 
-  private async fetchText(
-    url: string,
-    init?: Omit<RequestInit, "dispatcher" | "headers">,
-  ): Promise<string> {
-    const response = await fetch(url, { ...this.fetchOptions, ...init });
+  private async fetchText(url: string, init?: Omit<RequestInit, "headers">): Promise<string> {
+    const response = await this.fetchImpl(url, { ...this.fetchOptions, ...init });
     this.validateRes(response);
     return response.text();
   }
 
-  private async fetchJson<T>(
-    url: string,
-    init?: Omit<RequestInit, "dispatcher" | "headers">,
-  ): Promise<T> {
-    const response = await fetch(url, { ...this.fetchOptions, ...init });
+  private async fetchJson<T>(url: string, init?: Omit<RequestInit, "headers">): Promise<T> {
+    const response = await this.fetchImpl(url, { ...this.fetchOptions, ...init });
     this.validateRes(response);
     return (await response.json()) as T;
   }
@@ -424,9 +419,9 @@ export default class SteamWeb implements ISteamWeb {
       });
     }
     return items;
-    /** Preserve the public error type while delegating the badge-page parsing work. */
   }
 
+  /** Preserve the public error type while delegating the badge-page parsing work. */
   private parseFarmingData(html: string): FarmableGame[] {
     try {
       return parseFarmableGamesFromBadgesHtml(html);

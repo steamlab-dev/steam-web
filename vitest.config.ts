@@ -6,8 +6,12 @@ export default defineConfig({
     globals: true,
     exclude: [...configDefaults.exclude, "**/*.integration.test.ts"],
     coverage: {
+      branches: 90,
       exclude: ["src/types.ts"],
+      functions: 91,
       include: ["src/**/*.ts"],
+      lines: 96,
+      statements: 96,
     },
   },
   resolve: {

@@ -18,7 +18,7 @@ npm i @fcastrocs/steamweb
 
 - JWT login with Steam web tokens
 - Session reuse without logging in again
-- Optional Undici dispatcher support for proxies or custom transports
+- HTTP, HTTPS, and SOCKS5 proxy support
 - Trading card farming detection from the badges page
 - Trading card inventory fetching
 - Avatar, alias-history, and privacy management helpers
@@ -28,7 +28,7 @@ npm i @fcastrocs/steamweb
 ### Login
 
 ```ts
-import SteamWeb from "@fcastrocs/steamweb";
+import { SteamWeb } from "@fcastrocs/steamweb";
 
 const token = process.env.STEAM_WEB_REFRESH_TOKEN!;
 
@@ -36,22 +36,28 @@ const steamWeb = new SteamWeb();
 const session = await steamWeb.login(token);
 ```
 
-### Use a proxy or custom Undici dispatcher
+### Use a proxy
 
 ```ts
-import SteamWeb from "@fcastrocs/steamweb";
-import { ProxyAgent } from "undici";
+import { SteamWeb } from "@fcastrocs/steamweb";
 
-const dispatcher = new ProxyAgent("http://user:password@proxy-host:8080");
-const steamWeb = new SteamWeb({ dispatcher });
+const steamWeb = new SteamWeb({
+  proxyUrl: "http://user:password@proxy-host:8080",
+});
 
 await steamWeb.login(process.env.STEAM_WEB_REFRESH_TOKEN!);
 ```
 
+Supported proxy URL schemes are `http://`, `https://`, and `socks5://`.
+
+Authentication can be provided directly in the proxy URL, for example `socks5://user:password@proxy-host:1080`.
+
+Proxy transport is implemented with the native Node.js `fetch` API plus proxy agent packages. The public API remains `proxyUrl`.
+
 ### Reuse an existing session
 
 ```ts
-import SteamWeb from "@fcastrocs/steamweb";
+import { SteamWeb } from "@fcastrocs/steamweb";
 
 const steamWeb = new SteamWeb();
 

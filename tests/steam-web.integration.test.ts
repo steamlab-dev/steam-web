@@ -1,7 +1,7 @@
 import "dotenv/config";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import SteamWeb from "@/index";
+import { SteamWeb } from "@/index";
 import type { Session } from "@/types";
 
 const refreshToken = process.env.STEAM_WEB_REFRESH_TOKEN;

@@ -1,12 +1,17 @@
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { HttpProxyAgent } from "http-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import SteamWeb, { ERRORS, SteamWebError } from "@/index";
+import { ERRORS, SteamWeb, SteamWebError } from "@/index";
 import {
   parseAvatarFrameFromProfileHtml,
   parseFarmableGamesFromBadgesHtml,
 } from "@/internal/html-parsers";
+import { createFetch, createProxyAgent, parseProxyConfiguration } from "@/internal/proxy";
+import { withHttpProxyServers, withServers } from "./helpers";
 
 const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const badgesHtml = readFileSync(resolve(fixturesDir, "badges-page.html"), "utf8");
@@ -43,6 +48,12 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
   });
 }
 
+function queueFetchResponses(fetchMock: ReturnType<typeof vi.fn>, responses: Response[]): void {
+  for (const response of responses) {
+    fetchMock.mockResolvedValueOnce(response);
+  }
+}
+
 describe("steam-web", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -71,6 +82,257 @@ describe("steam-web", () => {
 
     expect(error.name).toBe("steam-web");
     expect(error.message).toBe("boom");
+  });
+
+  it.each([
+    {
+      expected: {
+        protocol: "https",
+        token: `Basic ${Buffer.from("user:pass").toString("base64")}`,
+      },
+      input: "https://user:pass@proxy.example:8443",
+      url: {
+        host: "proxy.example:8443",
+        protocol: "https:",
+      },
+    },
+    {
+      expected: {
+        password: "pa:ss",
+        protocol: "socks5",
+        username: "user",
+      },
+      input: "socks5://user:pa%3Ass@proxy.example:1080",
+      url: {
+        host: "proxy.example:1080",
+        protocol: "socks5:",
+      },
+    },
+    {
+      expected: {
+        password: undefined,
+        protocol: "socks5",
+        uri: "socks5://proxy.example:1080",
+        username: undefined,
+      },
+      input: new URL("socks5://proxy.example:1080"),
+      url: {
+        host: "proxy.example:1080",
+        protocol: "socks5:",
+      },
+    },
+  ])("parses proxy configuration from %s", ({ expected, input, url }) => {
+    const config = parseProxyConfiguration(input);
+
+    expect(config).toMatchObject(expected);
+
+    const proxyUrl = new URL(config.uri);
+    expect(proxyUrl.protocol).toBe(url.protocol);
+    expect(proxyUrl.host).toBe(url.host);
+    expect(proxyUrl.username).toBe("");
+    expect(proxyUrl.password).toBe("");
+  });
+
+  it.each([
+    {
+      input: "http://user@proxy.example:8080",
+      token: `Basic ${Buffer.from("user:").toString("base64")}`,
+    },
+    {
+      input: "http://:pass@proxy.example:8080",
+      token: `Basic ${Buffer.from(":pass").toString("base64")}`,
+    },
+  ])("handles partial proxy credentials for %s", ({ input, token }) => {
+    const config = parseProxyConfiguration(input);
+    expect(config.token).toBe(token);
+  });
+
+  it("creates the correct proxy agent type for HTTP-family and SOCKS5 proxies", () => {
+    expect(createProxyAgent("http://proxy.example:8080")).toBeInstanceOf(HttpProxyAgent);
+    expect(createProxyAgent("https://proxy.example:8443")).toBeInstanceOf(HttpProxyAgent);
+    expect(createProxyAgent("socks5://proxy.example:1080")).toBeInstanceOf(SocksProxyAgent);
+  });
+
+  it("rejects unsupported proxy protocols", () => {
+    expect(() => createProxyAgent("ftp://proxy.example:21")).toThrowError(
+      new TypeError("Unsupported proxy protocol. Expected one of: http, https, socks5."),
+    );
+  });
+
+  it("rejects socks5h because the supported SOCKS protocol is socks5", () => {
+    expect(() => createProxyAgent("socks5h://proxy.example:1080")).toThrowError(
+      new TypeError("Unsupported proxy protocol. Expected one of: http, https, socks5."),
+    );
+  });
+
+  it("returns the global fetch when no proxy URL is configured", () => {
+    expect(createFetch()).toBe(fetch);
+  });
+
+  it("bypasses proxy handling for non-http urls", async () => {
+    fetchMock.mockResolvedValueOnce(textResponse("ok"));
+    fetchMock.mockResolvedValueOnce(textResponse("still-ok"));
+
+    const proxiedFetch = createFetch("http://proxy.example:8080");
+
+    const firstResponse = await proxiedFetch("data:text/plain,ok");
+    const secondResponse = await proxiedFetch("data:text/plain,still-ok", {
+      headers: { accept: "application/json" },
+    });
+
+    expect(proxiedFetch).not.toBe(fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(firstResponse.text()).resolves.toBe("ok");
+    await expect(secondResponse.text()).resolves.toBe("still-ok");
+  });
+
+  it("performs proxied http requests through an HTTP proxy", async () => {
+    await withHttpProxyServers(
+      (request, response) => {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end(`upstream:${request.url}`);
+      },
+      async ({ proxyPort, upstreamPort }) => {
+        const proxiedFetch = createFetch(`http://127.0.0.1:${proxyPort}`);
+        const response = await proxiedFetch(`http://127.0.0.1:${upstreamPort}/proxy-check?ok=1`);
+
+        await expect(response.text()).resolves.toBe("upstream:/proxy-check?ok=1");
+      },
+    );
+  });
+
+  it("handles redirect semantics through the proxy for 301, 303, and 307", async () => {
+    await withHttpProxyServers(
+      async (request, response) => {
+        const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+
+        if (requestUrl.pathname === "/post-301") {
+          response.writeHead(301, { location: "/after-301" });
+          response.end();
+          return;
+        }
+
+        if (requestUrl.pathname === "/post-303") {
+          response.writeHead(303, { location: "/after-303" });
+          response.end();
+          return;
+        }
+
+        if (requestUrl.pathname === "/post-307") {
+          response.writeHead(307, { location: "/after-307" });
+          response.end();
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            body: chunks.length === 0 ? "" : Buffer.concat(chunks).toString("utf8"),
+            contentType: request.headers["content-type"] ?? null,
+            method: request.method,
+          }),
+        );
+      },
+      async ({ proxyPort, upstreamPort }) => {
+        const proxiedFetch = createFetch(`http://127.0.0.1:${proxyPort}`);
+
+        const from301 = await proxiedFetch(`http://127.0.0.1:${upstreamPort}/post-301`, {
+          body: "first",
+          headers: { "content-type": "text/plain" },
+          method: "POST",
+        });
+        const from303 = await proxiedFetch(`http://127.0.0.1:${upstreamPort}/post-303`, {
+          body: "second",
+          headers: { "content-type": "text/plain" },
+          method: "POST",
+        });
+        const from307 = await proxiedFetch(`http://127.0.0.1:${upstreamPort}/post-307`, {
+          body: "third",
+          headers: { "content-type": "text/plain" },
+          method: "POST",
+        });
+
+        await expect(from301.json()).resolves.toMatchObject({
+          body: "",
+          contentType: null,
+          method: "GET",
+        });
+        await expect(from303.json()).resolves.toMatchObject({
+          body: "",
+          contentType: null,
+          method: "GET",
+        });
+        await expect(from307.json()).resolves.toMatchObject({
+          body: "third",
+          contentType: "text/plain",
+          method: "POST",
+        });
+      },
+    );
+  });
+
+  it("returns redirect responses without location headers instead of following", async () => {
+    await withHttpProxyServers(
+      (request, response) => {
+        response.writeHead(302, { "content-type": "text/plain" });
+        response.end(`no-location:${request.method}`);
+      },
+      async ({ proxyPort, upstreamPort }) => {
+        const proxiedFetch = createFetch(`http://127.0.0.1:${proxyPort}`);
+        const response = await proxiedFetch(`http://127.0.0.1:${upstreamPort}/no-location`);
+
+        expect(response.status).toBe(302);
+        await expect(response.text()).resolves.toBe("no-location:GET");
+      },
+    );
+  });
+
+  it("throws after exceeding the max redirect depth", async () => {
+    await withHttpProxyServers(
+      (_, response) => {
+        response.writeHead(302, { location: "/loop" });
+        response.end();
+      },
+      async ({ proxyPort, upstreamPort }) => {
+        const proxiedFetch = createFetch(`http://127.0.0.1:${proxyPort}`);
+
+        await expect(proxiedFetch(`http://127.0.0.1:${upstreamPort}/loop`)).rejects.toThrow(
+          new TypeError("Too many redirects."),
+        );
+      },
+    );
+  });
+
+  it("surfaces CONNECT tunnel failures for HTTPS requests", async () => {
+    const statusProxyServer = createServer();
+    statusProxyServer.on("connect", (_request, clientSocket) => {
+      clientSocket.end(
+        "HTTP/1.1 407 Proxy Authentication Required\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+      );
+    });
+
+    const errorProxyServer = createServer();
+    errorProxyServer.on("connect", (_request, clientSocket) => {
+      clientSocket.destroy();
+    });
+
+    await withServers(
+      [statusProxyServer, errorProxyServer],
+      async ([statusProxyPort, errorProxyPort]) => {
+        const statusFailingFetch = createFetch(`http://127.0.0.1:${statusProxyPort}`);
+        const errorFailingFetch = createFetch(`http://127.0.0.1:${errorProxyPort}`);
+
+        await expect(statusFailingFetch("https://example.com/")).rejects.toMatchObject({
+          message: expect.stringMatching(/Proxy CONNECT failed with status 407\.|socket hang up/),
+        });
+        await expect(errorFailingFetch("https://example.com/")).rejects.toThrowError();
+      },
+    );
   });
 
   it("parses crafted badge rows with entity decoding and detail removal", () => {
@@ -144,42 +406,45 @@ describe("steam-web", () => {
     ).toBeNull();
   });
 
-  it("handles malformed avatar-frame markup defensively", () => {
-    expect(parseAvatarFrameFromProfileHtml("profile_avatar_frame")).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml("<div class='profile_avatar_frame'><span></span></div>"),
-    ).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml("<div class='profile_avatar_frame'><img alt='x'></div>"),
-    ).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml(
-        "<img class='profile_avatar_frame' src='https://example.com/frame.png'>",
-      ),
-    ).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml(
-        "<div class='profile_avatar_frame'><img src='https://example.com/frame.png'></div",
-      ),
-    ).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml("<1 class='profile_avatar_frame'>ignored</1>"),
-    ).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml(
-        "<div data-kind='profile_avatar_frame'><img src='https://example.com/frame.png'></div>",
-      ),
-    ).toBeNull();
-    expect(
-      parseAvatarFrameFromProfileHtml(
-        "<? class='profile_avatar_frame'>ignored<div class='profile_avatar_frame'><img src='https://example.com/frame.png'></div>",
-      ),
-    ).toBe("https://example.com/frame.png");
-    expect(
-      parseAvatarFrameFromProfileHtml(
-        "<section class='profile_avatar_frame'><img src='https://example.com/fallback.png'></span>",
-      ),
-    ).toBeNull();
+  it.each([
+    {
+      expected: null,
+      html: "profile_avatar_frame",
+    },
+    {
+      expected: null,
+      html: "<div class='profile_avatar_frame'><span></span></div>",
+    },
+    {
+      expected: null,
+      html: "<div class='profile_avatar_frame'><img alt='x'></div>",
+    },
+    {
+      expected: null,
+      html: "<img class='profile_avatar_frame' src='https://example.com/frame.png'>",
+    },
+    {
+      expected: null,
+      html: "<div class='profile_avatar_frame'><img src='https://example.com/frame.png'></div",
+    },
+    {
+      expected: null,
+      html: "<1 class='profile_avatar_frame'>ignored</1>",
+    },
+    {
+      expected: null,
+      html: "<div data-kind='profile_avatar_frame'><img src='https://example.com/frame.png'></div>",
+    },
+    {
+      expected: "https://example.com/frame.png",
+      html: "<? class='profile_avatar_frame'>ignored<div class='profile_avatar_frame'><img src='https://example.com/frame.png'></div>",
+    },
+    {
+      expected: null,
+      html: "<section class='profile_avatar_frame'><img src='https://example.com/fallback.png'></span>",
+    },
+  ])("handles malformed avatar-frame markup defensively: %s", ({ expected, html }) => {
+    expect(parseAvatarFrameFromProfileHtml(html)).toBe(expected);
   });
 
   it("skips malformed badge rows while preserving valid ones", () => {
@@ -317,9 +582,7 @@ describe("steam-web", () => {
   });
 
   it("loads farmable games and avatar frames through the public API", async () => {
-    fetchMock
-      .mockResolvedValueOnce(textResponse(badgesHtml))
-      .mockResolvedValueOnce(textResponse(profileHtml));
+    queueFetchResponses(fetchMock, [textResponse(badgesHtml), textResponse(profileHtml)]);
 
     const client = new SteamWeb();
     (client as any).steamid = "76561197960410044";
@@ -427,18 +690,15 @@ describe("steam-web", () => {
   });
 
   it("rejects invalid avatar content types and oversize images", async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        textResponse("", { headers: { "content-length": "512", "content-type": "text/html" } }),
-      )
-      .mockResolvedValueOnce(
-        textResponse("", {
-          headers: {
-            "content-length": String(1025 * 1024),
-            "content-type": "image/png",
-          },
-        }),
-      );
+    queueFetchResponses(fetchMock, [
+      textResponse("", { headers: { "content-length": "512", "content-type": "text/html" } }),
+      textResponse("", {
+        headers: {
+          "content-length": String(1025 * 1024),
+          "content-type": "image/png",
+        },
+      }),
+    ]);
 
     const client = new SteamWeb();
 
@@ -451,19 +711,14 @@ describe("steam-web", () => {
   });
 
   it("uploads an avatar and handles upload failures", async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        textResponse("", { headers: { "content-length": "512", "content-type": "image/png" } }),
-      )
-      .mockResolvedValueOnce(textResponse("avatar-binary"))
-      .mockResolvedValueOnce(
-        textResponse('{"success":true,"images":{"0":"small","full":"full.png","medium":"medium"}}'),
-      )
-      .mockResolvedValueOnce(
-        textResponse("", { headers: { "content-length": "512", "content-type": "image/png" } }),
-      )
-      .mockResolvedValueOnce(textResponse("avatar-binary"))
-      .mockResolvedValueOnce(textResponse("denied"));
+    queueFetchResponses(fetchMock, [
+      textResponse("", { headers: { "content-length": "512", "content-type": "image/png" } }),
+      textResponse("avatar-binary"),
+      textResponse('{"success":true,"images":{"0":"small","full":"full.png","medium":"medium"}}'),
+      textResponse("", { headers: { "content-length": "512", "content-type": "image/png" } }),
+      textResponse("avatar-binary"),
+      textResponse("denied"),
+    ]);
 
     const client = new SteamWeb();
     (client as any).sessionid = "session-1";
@@ -536,9 +791,8 @@ describe("steam-web", () => {
     expect((client as any).fetchOptions.headers.get("Cookie")).toContain("extra=value");
   });
 
-  it("supports dispatcher configuration and access-token login", async () => {
-    const dispatcher = { dispatch: vi.fn() } as unknown as NonNullable<RequestInit["dispatcher"]>;
-    const client = new SteamWeb({ dispatcher });
+  it("supports proxyUrl configuration and access-token login", async () => {
+    const client = new SteamWeb({ proxyUrl: "http://user:pass@proxy.example:8080" });
     const loginWithAccessToken = (client as any).loginWithAccessToken.bind(client) as (
       accessToken: string,
     ) => Promise<void>;
@@ -546,7 +800,7 @@ describe("steam-web", () => {
     (client as any).steamid = "76561197960410044";
     await loginWithAccessToken("token-value");
 
-    expect((client as any).fetchOptions.dispatcher).toBe(dispatcher);
+    expect(typeof (client as any).fetchImpl).toBe("function");
     expect((client as any).fetchOptions.headers.get("Cookie")).toContain(
       "steamLoginSecure=76561197960410044%7C%7Ctoken-value",
     );

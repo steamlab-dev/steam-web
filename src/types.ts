@@ -11,11 +11,10 @@ export interface ISteamWeb {
 }
 
 export interface Options {
-  dispatcher?: RequestInit["dispatcher"];
+  proxyUrl?: string | URL;
 }
 
 export interface FetchOptions {
-  dispatcher?: RequestInit["dispatcher"];
   headers: Headers;
 }
 

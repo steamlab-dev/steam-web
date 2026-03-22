@@ -45,7 +45,6 @@
     "type": "git",
     "url": "https://github.com/fcastrocs/steam-web.git"
   },
-  "dependencies": {},
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",
     "@types/node": "^25.5.0",
@@ -57,5 +56,9 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "http-proxy-agent": "^8.0.0",
+    "socks-proxy-agent": "^9.0.0"
   }
 }
