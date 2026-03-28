@@ -2,3 +2,6 @@ node_modules
 dist
 coverage
 .env
+tests/.env
+.agents
+skills-lock.json

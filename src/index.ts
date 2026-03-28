@@ -1,38 +1,19 @@
 import { randomBytes } from "node:crypto";
 import { URLSearchParams } from "node:url";
+import Fetch from "./internal/Fetch";
 import {
   parseAvatarFrameFromProfileHtml,
   parseFarmableGamesFromBadgesHtml,
 } from "./internal/html-parsers";
-import { createFetch } from "./internal/proxy";
-import SteamWebError from "./SteamWebError.js";
-import type {
-  AvatarUploadResponse,
-  FarmableGame,
-  FetchOptions,
-  InventoryResponse,
-  ISteamWeb,
-  Item,
-  Options,
-  Payload,
-  ProfilePrivacy,
-  Session,
-} from "./types";
+import type { FarmableGame, Item, Options, ProfilePrivacy, Session } from "./types";
 
 export type {
-  AvatarUploadResponse,
   FarmableGame,
-  FetchOptions,
-  InventoryResponse,
-  ISteamWeb,
   Item,
-  Notifications,
   Options,
-  Payload,
   ProfilePrivacy,
   Session,
 } from "./types";
-export { SteamWebError };
 
 export const ERRORS = {
   RATE_LIMIT: "RateLimitExceeded",
@@ -41,73 +22,342 @@ export const ERRORS = {
   INVALID_TOKEN: "InvalidToken",
 } as const;
 
+export class SteamWebError extends Error {
+  constructor(message: string) {
+    super(message);
+    super.name = "steam-web";
+  }
+}
+
 const USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64; Valve Steam Client/default/0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36";
-const GENERATE_ACCESS_TOKEN_URL =
-  "https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1";
+const FINALIZE_LOGIN_URL = "https://login.steampowered.com/jwt/finalizelogin";
+const PROFILE_URL = "https://steamcommunity.com/profiles";
+const AVATAR_UPLOAD_URL = "https://steamcommunity.com/actions/FileUploader/";
+const PROFILE_PRIVACY_LEVEL: Record<ProfilePrivacy, number> = {
+  friendsOnly: 2,
+  private: 1,
+  public: 3,
+};
+const PUBLIC_PRIVACY_SETTINGS = {
+  PrivacyInventory: 3,
+  PrivacyInventoryGifts: 3,
+  PrivacyOwnedGames: 3,
+  PrivacyPlaytime: 3,
+  PrivacyFriendsList: 3,
+};
 
-export class SteamWeb implements ISteamWeb {
-  private steamid = "";
-  private sessionid = randomBytes(12).toString("hex");
+type TransferInfo = { url: string; params: Record<string, string> };
+type FinalizeLoginResponse = { transfer_info?: TransferInfo[] };
+type TransferResponseBody = { result?: number };
+type FetchOptions = { headers: Headers };
+type AvatarUploadResponse = {
+  success: boolean;
+  images: { "0": string; full: string; medium: string };
+  hash: string;
+  message: string;
+};
+type InventoryResponse = {
+  success: boolean;
+  Error?: string;
+  rgInventory: Record<
+    string,
+    {
+      id: string;
+      classid: string;
+      instanceid: string;
+      amount: string;
+    }
+  >;
+  rgDescriptions: Record<
+    string,
+    {
+      icon_url: string;
+      name: string;
+      type: string;
+      tradable: number;
+    }
+  >;
+};
+type Payload = {
+  iss: string;
+  sub: string;
+  aud: string[];
+  exp: number;
+  nbf: number;
+  iat: number;
+  jti: string;
+  oat: number;
+  per: number;
+  ip_subject: string;
+  ip_confirmer: string;
+};
+type SteamLoginSecureCookie = Session["steamLoginSecure"];
+
+export type SteamWebSession = Session;
+
+type ParsedSetCookie = { raw: string; name: string; value: string };
+type SuccessResponse = { success?: boolean | number };
+
+/**
+ * Steam community helper focused on JWT-based login, session reuse, and profile/inventory actions.
+ *
+ * This package does not acquire Steam tokens on its own. It expects a Steam web JWT obtained
+ * elsewhere and accepts either a refresh token or an access token in `login()`.
+ */
+export class SteamWeb {
   private readonly fetchImpl: typeof fetch;
-  private fetchOptions: FetchOptions = {
-    headers: new Headers(),
-  };
-  private refreshToken = "";
+  private cookieJar = new Map<string, string>();
+  private fetchOptions: FetchOptions = { headers: new Headers({ "User-Agent": USER_AGENT }) };
+  private steamWebSession = this.createEmptySession();
 
-  constructor(private readonly options?: Options) {
-    this.fetchImpl = createFetch(this.options?.proxyUrl);
-    this.fetchOptions.headers.set("User-Agent", USER_AGENT);
-    this.fetchOptions.headers.set("Cookie", "");
+  constructor(options?: Options) {
+    this.fetchImpl = new Fetch(options?.proxyUrl).fetch;
   }
 
-  /** Reuse a previously established Steam session. */
-  async setSession(session: Session): Promise<void> {
-    this.sessionid = session.sessionid;
-    this.steamid = session.steamid;
-    this.fetchOptions.headers.set("Cookie", session.cookies);
-  }
-
-  /** Log into Steamcommunity.com with a JWT access or refresh token. */
-  async login(token: string): Promise<Session> {
+  async login(token: string): Promise<SteamWebSession> {
     const { payload } = this.verifyToken(token);
-    this.steamid = payload.sub;
-    this.refreshToken = token;
+    const steamid = payload.sub;
+    const isRefreshToken = payload.aud.includes("renew");
+    const session = this.createEmptySession();
 
-    // Steam sets the cookies we need as part of this app-token bootstrap call.
-    await this.generateAccessTokenForApp();
+    session.sessionid = randomBytes(12).toString("hex");
+    session.steamid = steamid;
+    if (!isRefreshToken) {
+      session.steamLoginSecure = this.createSteamLoginSecureCookie(steamid, token);
+    }
 
-    return {
-      cookies: this.fetchOptions.headers.get("Cookie") ?? "",
-      sessionid: this.sessionid,
-      steamid: this.steamid,
-    };
-  }
+    this.applySession(session);
 
-  private async generateAccessTokenForApp(): Promise<void> {
-    const params = new URLSearchParams({
-      access_token: this.refreshToken,
-      key: "5C97A7C241055E3A36E95B7EED8A66FC",
-      steamid: this.steamid,
-    });
-    const response = await this.fetchImpl(`${GENERATE_ACCESS_TOKEN_URL}?${params.toString()}`, {
-      ...this.fetchOptions,
-      method: "POST",
-    });
+    if (isRefreshToken) {
+      this.steamWebSession.steamLoginSecure = await this.finalizeLogin(token);
+      this.applySession(this.steamWebSession, false);
+    }
 
-    this.setCookieHeader(response.headers.get("set-cookie"));
+    return this.cloneSession(this.steamWebSession);
   }
 
   /** Clear the current Steam web session. */
   async logout(): Promise<void> {
+    this.applySession(this.createEmptySession());
+  }
+
+  setSession(session: SteamWebSession): void {
+    this.applySession(this.cloneSession(session));
+  }
+
+  private applySession(session: SteamWebSession, resetCookies = true): void {
+    this.steamWebSession = session;
+    if (resetCookies) {
+      this.cookieJar.clear();
+    }
+
+    if (session.sessionid) {
+      this.cookieJar.set("sessionid", session.sessionid);
+    }
+    if (session.steamLoginSecure.steamLoginSecure) {
+      this.cookieJar.set("steamLoginSecure", session.steamLoginSecure.steamLoginSecure);
+    }
+
+    this.applyCookiesToHeaders();
+  }
+
+  /** Return games that still have Steam trading cards left to drop. */
+  async getFarmableGames(): Promise<FarmableGame[]> {
+    return this.parseFarmingData(await this.fetchText(this.requireProfileUrl("badges")));
+  }
+
+  /** Return the current profile avatar frame image URL if one exists. */
+  async getAvatarFrame(): Promise<string | null> {
+    return parseAvatarFrameFromProfileHtml(await this.fetchText(this.requireProfileUrl()));
+  }
+
+  /** Return the current trading card inventory. */
+  async getCardsInventory(): Promise<Item[]> {
+    const contextId = "6";
+    const data = await this.fetchJson<InventoryResponse>(
+      this.requireProfileUrl("inventory", "json", "753", contextId),
+    );
+    if (data.success) {
+      return this.parseItems(data, contextId);
+    }
+    if (data.Error === "This profile is private.") {
+      throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
+    }
+    throw data;
+  }
+
+  /** Upload a new profile avatar from a remote JPEG or PNG URL. */
+  async changeAvatar(avatarURL: string): Promise<string> {
+    const blob = await this.fetchAvatarBlob(avatarURL);
     const form = new FormData();
-    form.append("sessionid", this.sessionid);
-    await this.fetchImpl("https://store.steampowered.com/logout/", {
-      ...this.fetchOptions,
-      method: "POST",
+
+    form.append("name", "avatar");
+    form.append("filename", "blob");
+    form.append("avatar", blob);
+    form.append("type", "player_avatar_image");
+    form.append("sId", this.steamWebSession.steamid);
+    form.append("sessionid", this.steamWebSession.sessionid);
+    form.append("doSub", "1");
+    form.append("json", "1");
+
+    const data = await this.fetchJsonResponse<AvatarUploadResponse>(AVATAR_UPLOAD_URL, {
       body: form,
+      method: "POST",
     });
-    this.fetchOptions.headers.set("Cookie", "");
+    if (!data?.success) {
+      throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
+    }
+    return data.images.full;
+  }
+
+  /** Clear the account's alias history. */
+  async clearAliases(): Promise<void> {
+    await this.expectSuccess(
+      `${this.requireProfileUrl("ajaxclearaliashistory")}/`,
+      new URLSearchParams({ sessionid: this.steamWebSession.sessionid }),
+    );
+  }
+
+  /** Update profile visibility while keeping related privacy flags public. */
+  async changePrivacy(privacy: ProfilePrivacy): Promise<void> {
+    const form = new FormData();
+
+    form.append("sessionid", this.steamWebSession.sessionid);
+    form.append(
+      "Privacy",
+      JSON.stringify({
+        ...PUBLIC_PRIVACY_SETTINGS,
+        PrivacyProfile: PROFILE_PRIVACY_LEVEL[privacy],
+      }),
+    );
+    form.append("eCommentPermission", "1");
+
+    await this.expectSuccess(`${this.requireProfileUrl("ajaxsetprivacy")}/`, form);
+  }
+
+  private createEmptySession(): SteamWebSession {
+    return {
+      sessionid: "",
+      steamid: "",
+      steamLoginSecure: { steamLoginSecure: "", expires: 0 },
+    };
+  }
+
+  private createSteamLoginSecureCookie(steamid: string, token: string): SteamLoginSecureCookie {
+    return { steamLoginSecure: encodeURIComponent(`${steamid}||${token}`), expires: 0 };
+  }
+
+  private cloneSession(session: SteamWebSession): SteamWebSession {
+    return {
+      sessionid: session.sessionid,
+      steamid: session.steamid,
+      steamLoginSecure: { ...session.steamLoginSecure },
+    };
+  }
+
+  private requireProfileUrl(...segments: string[]): string {
+    if (!this.steamWebSession.steamid) {
+      throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
+    }
+    return `${PROFILE_URL}/${encodeURIComponent(this.steamWebSession.steamid)}${segments.length ? `/${segments.join("/")}` : ""}`;
+  }
+
+  private mergeResponseCookies(response: Response): void {
+    for (const { name, value } of this.readSetCookies(response)) {
+      if (value === "") {
+        this.cookieJar.delete(name);
+      } else {
+        this.cookieJar.set(name, value);
+      }
+    }
+  }
+
+  private applyCookiesToHeaders(): void {
+    const cookies = Array.from(this.cookieJar, ([name, value]) => `${name}=${value}`).join("; ");
+    if (cookies) {
+      this.fetchOptions.headers.set("cookie", cookies);
+    } else {
+      this.fetchOptions.headers.delete("cookie");
+    }
+  }
+
+  private readSetCookies(response: Response): ParsedSetCookie[] {
+    return (response.headers.getSetCookie?.() ?? []).flatMap((raw) => {
+      const pair = raw.split(";", 1)[0]?.trim() ?? "";
+      const eq = pair?.indexOf("=") ?? -1;
+      const name = eq > 0 ? pair.slice(0, eq).trim() : "";
+      return name ? [{ raw, name, value: pair.slice(eq + 1) }] : [];
+    });
+  }
+
+  private async finalizeLogin(refreshToken: string): Promise<SteamLoginSecureCookie> {
+    const response = await this.request(FINALIZE_LOGIN_URL, {
+      body: new URLSearchParams({
+        nonce: refreshToken,
+        redir: "https://steamcommunity.com/login/?redir=&redir_ssl=1",
+        sessionid: this.steamWebSession.sessionid,
+      }),
+      method: "POST",
+    });
+    const data = (await response.json()) as FinalizeLoginResponse;
+    const transfer = data.transfer_info?.find((item) => this.isSteamCommunityTransfer(item.url));
+
+    if (!transfer) {
+      throw new SteamWebError(
+        data.transfer_info?.length
+          ? "Login failed: no transfer info received for steamcommunity.com."
+          : "Login failed: no transfer info received.",
+      );
+    }
+
+    return this.fetchSteamLoginSecureCookie(transfer);
+  }
+
+  private async fetchSteamLoginSecureCookie(
+    transfer: TransferInfo,
+  ): Promise<SteamLoginSecureCookie> {
+    const response = await this.request(transfer.url, {
+      body: new URLSearchParams({ ...transfer.params, steamID: this.steamWebSession.steamid }),
+      method: "POST",
+    });
+    const steamLoginSecureCookie = this.parseCookie(response);
+
+    if (!steamLoginSecureCookie) {
+      const body = await this.readJson<TransferResponseBody>(response);
+      const cookies =
+        this.readSetCookies(response)
+          .map(({ name }) => name)
+          .join(", ") || "none";
+      throw new SteamWebError(
+        `Login failed: steamcommunity token transfer did not issue steamLoginSecure (result=${body?.result ?? "unknown"}, set-cookie=${cookies}).`,
+      );
+    }
+
+    return steamLoginSecureCookie;
+  }
+
+  private isSteamCommunityTransfer(url: string): boolean {
+    try {
+      return new URL(url).hostname === "steamcommunity.com";
+    } catch {
+      return false;
+    }
+  }
+
+  private parseCookie(response: Response): SteamLoginSecureCookie | null {
+    const cookie = this.readSetCookies(response).find(
+      ({ name, value }) => name === "steamLoginSecure" && value,
+    );
+    if (!cookie) {
+      return null;
+    }
+
+    const expires = /(?:^|;\s*)expires=([^;]+)/i.exec(cookie.raw)?.[1];
+    return {
+      steamLoginSecure: cookie.value,
+      expires: expires && !Number.isNaN(Date.parse(expires)) ? Date.parse(expires) : 0,
+    };
   }
 
   private verifyToken(token: string): { payload: Payload } {
@@ -117,230 +367,117 @@ export class SteamWeb implements ISteamWeb {
         throw new SteamWebError(ERRORS.INVALID_TOKEN);
       }
 
-      const buff = Buffer.from(encodedPayload, "base64");
-      const payload = JSON.parse(buff.toString("utf8")) as Payload;
+      const payload = JSON.parse(
+        Buffer.from(encodedPayload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(
+          "utf8",
+        ),
+      ) as Payload;
 
       if (!payload.aud.includes("web")) {
         throw new SteamWebError("Token audience is not valid for web.");
       }
-
-      const currTime = ~~(Date.now() / 1000);
-      const timeLeft = payload.exp - currTime;
-
-      // don't accept tokens that are about to expire
-      if (timeLeft / 60 < 1) {
+      if (payload.exp <= Math.floor(Date.now() / 1000)) {
         throw new SteamWebError(ERRORS.TOKEN_EXPIRED);
       }
 
       return { payload };
     } catch (error) {
-      if (
-        error instanceof SteamWebError ||
-        error instanceof SyntaxError ||
-        error instanceof TypeError
-      ) {
+      if (error instanceof SteamWebError) {
+        throw error;
+      }
+      if (error instanceof SyntaxError || error instanceof TypeError) {
         throw new SteamWebError(ERRORS.INVALID_TOKEN);
       }
       throw error;
     }
   }
 
-  /** Merge cookies from a Set-Cookie header into the shared Cookie header. */
-  private setCookieHeader(strCookies: string | null): void {
-    if (!strCookies) {
-      return;
+  private async fetchAvatarBlob(avatarURL: string): Promise<Blob> {
+    const source = await this.fetchImpl(avatarURL);
+    if (!source.ok) {
+      throw new SteamWebError(`Avatar source request failed with status ${source.status}.`);
     }
 
-    const cookies = new Map<string, string>();
+    const blob = await source.blob();
+    const contentType = blob.type || source.headers.get("content-type") || "";
 
-    strCookies.split(",").forEach((c) => {
-      const rawCookie = c.split("; Path")[0];
-      if (!rawCookie) {
-        return;
-      }
-
-      const [name, value] = rawCookie.trim().split("=");
-      if (!name || value === undefined) {
-        return;
-      }
-
-      cookies.set(name, value);
-    });
-
-    for (const [name, value] of cookies) {
-      this.setCookie(name, value);
-
-      if (name === "sessionid") {
-        this.sessionid = value;
-      }
-    }
-  }
-
-  /** Prepend a cookie value so later writes override older ones by name. */
-  private setCookie(name: string, value: string): void {
-    const cookie = `${name}=${value}`;
-    let cookies = this.fetchOptions.headers.get("Cookie") ?? "";
-    cookies = `${cookie}; ${cookies}`;
-    this.fetchOptions.headers.set("Cookie", cookies);
-  }
-
-  /** Return games that still have Steam trading cards left to drop. */
-  async getFarmableGames(): Promise<FarmableGame[]> {
-    const url = `https://steamcommunity.com/profiles/${this.steamid}/badges`;
-    const html = await this.fetchText(url);
-    return this.parseFarmingData(html);
-  }
-
-  /** Return the current profile avatar frame image URL if one exists. */
-  async getAvatarFrame(): Promise<string | null> {
-    const url = `https://steamcommunity.com/profiles/${this.steamid}`;
-    return parseAvatarFrameFromProfileHtml(await this.fetchText(url));
-  }
-
-  /** Return the current trading card inventory. */
-  async getCardsInventory(): Promise<Item[]> {
-    const contextId = "6"; // trading cards
-    const url = `https://steamcommunity.com/profiles/${this.steamid}/inventory/json/753/${contextId}`;
-    const data = await this.fetchJson<InventoryResponse>(url);
-
-    if (!data.success) {
-      if (data.Error === "This profile is private.") {
-        throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
-      }
-
-      throw data;
-    }
-
-    const items = this.parseItems(data, contextId);
-    return items;
-  }
-
-  /** Upload a new profile avatar from a remote JPEG or PNG URL. */
-  async changeAvatar(avatarURL: string): Promise<string> {
-    let res = await this.fetchImpl(avatarURL, { method: "HEAD" });
-    const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("image/jpeg") && !contentType.includes("image/png")) {
       throw new SteamWebError("URL does not contain a JPEG or PNG image.");
     }
-
-    if (Number.parseInt(res.headers.get("content-length") ?? "0", 10) / 1024 > 1024) {
+    if (blob.size > 1024 * 1024) {
       throw new SteamWebError("Image size should not be larger than 1024 kB.");
     }
 
-    const blob = await this.fetchImpl(avatarURL).then((res) => res.blob());
-    const url = "https://steamcommunity.com/actions/FileUploader/";
-
-    const form = new FormData();
-    form.append("name", "avatar");
-    form.append("filename", "blob");
-    form.append("avatar", blob);
-    form.append("type", "player_avatar_image");
-    form.append("sId", this.steamid);
-    form.append("sessionid", this.sessionid);
-    form.append("doSub", "1");
-    form.append("json", "1");
-
-    res = await this.fetchImpl(url, { ...this.fetchOptions, method: "POST", body: form });
-    this.validateRes(res);
-    const text = await res.text();
-
-    if (!text.includes(`{"success":true,`)) {
-      throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
-    }
-
-    const json: AvatarUploadResponse = JSON.parse(text);
-    return json.images.full;
+    return blob;
   }
 
-  /** Clear the account's alias history. */
-  async clearAliases(): Promise<void> {
-    const url = `https://steamcommunity.com/profiles/${this.steamid}/ajaxclearaliashistory/`;
-
-    const params = new URLSearchParams();
-    params.append("sessionid", this.sessionid);
-
-    const text = await this.fetchText(url, { body: params, method: "POST" });
-    if (!text.includes('{"success":1')) {
+  private async expectSuccess(url: string, body: FormData | URLSearchParams): Promise<void> {
+    const data = await this.fetchJsonResponse<SuccessResponse>(url, { body, method: "POST" });
+    if (data?.success !== 1 && data?.success !== true) {
       throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
     }
   }
 
-  /** Update profile visibility while keeping related privacy flags public. */
-  async changePrivacy(privacy: ProfilePrivacy): Promise<void> {
-    const url = `https://steamcommunity.com/profiles/${this.steamid}/ajaxsetprivacy/`;
-
-    const settings = {
-      PrivacyProfile: 3,
-      PrivacyInventory: 3,
-      PrivacyInventoryGifts: 3,
-      PrivacyOwnedGames: 3,
-      PrivacyPlaytime: 3,
-      PrivacyFriendsList: 3,
-    };
-
-    if (privacy === "public") {
-      settings.PrivacyProfile = 3;
-    } else if (privacy === "friendsOnly") {
-      settings.PrivacyProfile = 2;
-    } else if (privacy === "private") {
-      settings.PrivacyProfile = 1;
-    }
-
-    const form = new FormData();
-    form.append("sessionid", this.sessionid);
-    form.append("Privacy", JSON.stringify(settings));
-    form.append("eCommentPermission", "1");
-
-    const text = await this.fetchText(url, { body: form, method: "POST" });
-    if (!text.includes('{"success":1')) {
-      throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
-    }
+  private async request(url: string, init?: Omit<RequestInit, "headers">): Promise<Response> {
+    const response = await this.fetchImpl(url, { ...this.fetchOptions, ...init });
+    this.mergeResponseCookies(response);
+    this.applyCookiesToHeaders();
+    this.validateRes(response);
+    return response;
   }
 
   private async fetchText(url: string, init?: Omit<RequestInit, "headers">): Promise<string> {
-    const response = await this.fetchImpl(url, { ...this.fetchOptions, ...init });
-    this.validateRes(response);
-    return response.text();
+    return (await this.request(url, init)).text();
   }
 
   private async fetchJson<T>(url: string, init?: Omit<RequestInit, "headers">): Promise<T> {
-    const response = await this.fetchImpl(url, { ...this.fetchOptions, ...init });
-    this.validateRes(response);
-    return (await response.json()) as T;
+    return (await this.request(url, init)).json() as Promise<T>;
+  }
+
+  private async fetchJsonResponse<T>(
+    url: string,
+    init?: Omit<RequestInit, "headers">,
+  ): Promise<T | null> {
+    return this.readJson<T>(await this.request(url, init));
+  }
+
+  private async readJson<T>(response: Response): Promise<T | null> {
+    try {
+      const text = await response.clone().text();
+      return text ? (JSON.parse(text) as T) : null;
+    } catch {
+      return null;
+    }
   }
 
   private parseItems(data: InventoryResponse, contextId: string): Item[] {
-    const inventory = data.rgInventory;
-    const description = data.rgDescriptions;
-
     const items: Item[] = [];
 
-    for (const key in inventory) {
-      const inventoryItem = inventory[key];
+    for (const inventoryItem of Object.values(data.rgInventory)) {
       if (!inventoryItem) {
         continue;
       }
 
-      const c_i = `${inventoryItem.classid}_${inventoryItem.instanceid}`;
-      const itemDescription = description[c_i];
-      if (!itemDescription) {
+      const description =
+        data.rgDescriptions[`${inventoryItem.classid}_${inventoryItem.instanceid}`];
+      if (!description) {
         continue;
       }
 
       items.push({
         assetid: inventoryItem.id,
         amount: inventoryItem.amount,
-        icon: itemDescription.icon_url,
-        name: itemDescription.name,
-        type: itemDescription.type,
-        tradable: itemDescription.tradable === 1,
+        icon: description.icon_url,
+        name: description.name,
+        type: description.type,
+        tradable: description.tradable === 1,
         contextId,
       });
     }
+
     return items;
   }
 
-  /** Preserve the public error type while delegating the badge-page parsing work. */
   private parseFarmingData(html: string): FarmableGame[] {
     try {
       return parseFarmableGamesFromBadgesHtml(html);
@@ -348,23 +485,21 @@ export class SteamWeb implements ISteamWeb {
       if (error instanceof Error && error.message === ERRORS.NOT_LOGGEDIN) {
         throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
       }
-
       throw error;
     }
   }
 
-  /** Normalize common Steam HTTP failures into the library's public error contract. */
   private validateRes(response: Response) {
     if (response.status === 429) {
       throw new SteamWebError(ERRORS.RATE_LIMIT);
     }
-
     if (response.status === 401) {
       throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
     }
-
     if (!response.ok) {
       throw response;
     }
   }
 }
+
+export default SteamWeb;

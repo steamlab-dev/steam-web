@@ -4,8 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     globals: true,
-    globalSetup: ["./tests/support/integration-docker.ts"],
-    include: ["tests/integration/**/*.integration.test.ts"],
+    include: ["tests/integration/steam-web.integration.test.ts"],
     hookTimeout: 120_000,
     maxWorkers: 1,
     fileParallelism: false,

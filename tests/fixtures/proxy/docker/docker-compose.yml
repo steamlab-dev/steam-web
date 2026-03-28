@@ -1,0 +1,42 @@
+services:
+  socks5:
+    image: serjs/go-socks5-proxy@sha256:0af522996f402c03ecd985a87997158eabeb28935365e3a384df37eafcf740ea
+    environment:
+      REQUIRE_AUTH: "false"
+    ports:
+      - "19380:1080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  socks5-auth:
+    image: serjs/go-socks5-proxy@sha256:0af522996f402c03ecd985a87997158eabeb28935365e3a384df37eafcf740ea
+    environment:
+      PROXY_USER: integration_user
+      PROXY_PASSWORD: integration_pass
+    ports:
+      - "19381:1080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  https-proxy:
+    image: ubuntu/squid:5.2-22.04_beta
+    command: ["-N", "-f", "/etc/squid/squid.conf"]
+    ports:
+      - "19443:8443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./squid/squid.conf:/etc/squid/squid.conf:ro
+      - "${STEAM_WEB_PROXY_CERTS_DIR}:/etc/squid/certs:ro"
+
+  https-proxy-auth:
+    image: ubuntu/squid:5.2-22.04_beta
+    command: ["-N", "-f", "/etc/squid/squid-auth.conf"]
+    ports:
+      - "19444:8443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./squid/squid-auth.conf:/etc/squid/squid-auth.conf:ro
+      - ./squid/users.htpasswd:/etc/squid/users.htpasswd:ro
+      - "${STEAM_WEB_PROXY_CERTS_DIR}:/etc/squid/certs:ro"

@@ -8,7 +8,15 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!dist", "!coverage", "!.tsdown", "!tests/fixtures/**/*.html"]
+    "includes": [
+      "**",
+      "!dist",
+      "!coverage",
+      "!.tsdown",
+      "!.agents",
+      "!.codex",
+      "!tests/fixtures/**/*.html"
+    ]
   },
   "formatter": {
     "enabled": true,

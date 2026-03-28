@@ -30,7 +30,8 @@
     "fix": "biome check --write .",
     "test": "vitest --run",
     "test:coverage": "vitest --run --coverage --exclude '**/*.integration.test.ts'",
-    "test:integration": "vitest --run --config vitest.integration.config.ts",
+    "test:live": "vitest --run --config vitest.live.config.ts tests/integration/steam-web.integration.test.ts",
+    "test:fetch": "node --experimental-strip-types tests/support/run-fetch-integration.ts",
     "build": "tsdown",
     "prepublishOnly": "npm run build"
   },
