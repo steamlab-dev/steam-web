@@ -11,7 +11,7 @@ It focuses on JWT-based login, session reuse, inventory/profile helpers, and bad
 ## Installation
 
 ```sh
-npm i @fcastrocs/steamweb
+npm i @steamlab/steam-web
 ```
 
 ## Features
@@ -28,7 +28,7 @@ npm i @fcastrocs/steamweb
 ### Login
 
 ```ts
-import { SteamWeb } from "@fcastrocs/steamweb";
+import { SteamWeb } from "@steamlab/steam-web";
 
 const token = "REFRESH_TOKEN or ACCESS_TOKEN";
 
@@ -46,7 +46,7 @@ This package does not acquire Steam tokens for you. It is intended to be used wi
 ### Reuse an existing session to skip login flow
 
 ```ts
-import { SteamWeb, type SteamWebSession } from "@fcastrocs/steamweb";
+import { SteamWeb, type SteamWebSession } from "@steamlab/steam-web";
 
 const session: SteamWebSession = { ... };
 
@@ -68,7 +68,7 @@ const inventory = await steamWeb.getCardsInventory();
 - `socks5://`
 
 ```ts
-import { SteamWeb } from "@fcastrocs/steamweb";
+import { SteamWeb } from "@steamlab/steam-web";
 
 const steamWeb = new SteamWeb({
   proxyUrl: "socks5://user:password@proxy-host:1080",
@@ -94,7 +94,7 @@ await steamWeb.changePrivacy("friendsOnly");
 ### Handle library errors
 
 ```ts
-import { ERRORS, SteamWeb, SteamWebError } from "@fcastrocs/steamweb";
+import { ERRORS, SteamWeb, SteamWebError } from "@steamlab/steam-web";
 
 try {
   await new SteamWeb().login(token);

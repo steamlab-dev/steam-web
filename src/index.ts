@@ -512,5 +512,3 @@ export class SteamWeb {
     }
   }
 }
-
-export default SteamWeb;

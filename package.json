@@ -1,7 +1,7 @@
 {
-  "name": "@fcastrocs/steamweb",
+  "name": "@steamlab/steam-web",
   "version": "0.0.1",
-  "description": "Interact with steamcommunity.com.",
+  "description": "A Node.js library for interacting with steamcommunity.com, providing unofficial APIs.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -44,7 +44,7 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fcastrocs/steam-web.git"
+    "url": "https://github.com/steamlab-dev/steam-web.git"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",
