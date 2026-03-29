@@ -30,7 +30,7 @@ npm i @fcastrocs/steamweb
 ```ts
 import { SteamWeb } from "@fcastrocs/steamweb";
 
-const token = "REFRESH_TOKEN or ACCESS_TOKEN"
+const token = "REFRESH_TOKEN or ACCESS_TOKEN";
 
 const steamWeb = new SteamWeb();
 const session = await steamWeb.login(token);
@@ -55,6 +55,8 @@ steamWeb.setSession(session);
 
 const inventory = await steamWeb.getCardsInventory();
 ```
+
+`setSession()` rejects restored sessions whose `steamLoginSecure.expires` timestamp is already in the past. A value of `0` is still allowed for sessions whose cookie expiry is unknown, such as access-token-based sessions.
 
 `logout()` only clears the in-memory session state held by the client instance.
 
@@ -120,6 +122,8 @@ changeAvatar(avatarURL: string): Promise<string>;
 clearAliases(): Promise<void>;
 changePrivacy(privacy: "public" | "friendsOnly" | "private"): Promise<void>;
 ```
+
+`setSession()` throws `SteamWebError(ERRORS.TOKEN_EXPIRED)` when the restored `steamLoginSecure.expires` value is non-zero and already expired.
 
 Also exported:
 
