@@ -69,6 +69,8 @@ const createRefreshTokenLoginResponse = (
     transfer_info: transferInfo,
   });
 
+const RESTORED_SESSION_NOW = 1_762_000_000_000;
+
 describe("steam-web", () => {
   beforeEach(() => {
     fetchMock = vi.fn();
@@ -287,7 +289,7 @@ describe("steam-web", () => {
       const session = createSession({
         sessionid: "restored-session",
         steamLoginSecure: {
-          expires: 1_762_000_000_000,
+          expires: 4_102_444_800_000,
           steamLoginSecure: "restored-secure",
         },
       });
@@ -312,13 +314,52 @@ describe("steam-web", () => {
       expect(internals.steamWebSession.steamLoginSecure.steamLoginSecure).toBe("restored-secure");
     });
 
+    it.each([
+      {
+        expires: RESTORED_SESSION_NOW - 1,
+        expectedError: new SteamWebError(ERRORS.TOKEN_EXPIRED),
+        name: "rejects restored sessions with an expired steamLoginSecure cookie",
+      },
+      {
+        expires: 0,
+        expectedError: undefined,
+        name: "allows restored sessions with an unknown steamLoginSecure expiry",
+      },
+      {
+        expires: RESTORED_SESSION_NOW + 1,
+        expectedError: undefined,
+        name: "allows restored sessions with a future steamLoginSecure expiry",
+      },
+    ])("$name", ({ expires, expectedError }) => {
+      const client = new SteamWeb();
+
+      vi.spyOn(Date, "now").mockReturnValue(RESTORED_SESSION_NOW);
+
+      const restoreSession = () =>
+        client.setSession(
+          createSession({
+            steamLoginSecure: {
+              expires,
+              steamLoginSecure: "restored-secure",
+            },
+          }),
+        );
+
+      if (expectedError) {
+        expect(restoreSession).toThrow(expectedError);
+        return;
+      }
+
+      expect(restoreSession).not.toThrow();
+    });
+
     it("uses restored session cookies on subsequent requests", async () => {
       fetchMock.mockResolvedValueOnce(textResponse(badgesHtml));
 
       const client = createSeededClient({
         sessionid: "restored-session",
         steamLoginSecure: {
-          expires: 1_762_000_000_000,
+          expires: 4_102_444_800_000,
           steamLoginSecure: "restored-secure",
         },
       });

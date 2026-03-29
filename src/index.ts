@@ -143,7 +143,9 @@ export class SteamWeb {
   }
 
   setSession(session: SteamWebSession): void {
-    this.applySession(this.cloneSession(session));
+    const nextSession = this.cloneSession(session);
+    this.validateSessionExpiry(nextSession);
+    this.applySession(nextSession);
   }
 
   private applySession(session: SteamWebSession, resetCookies = true): void {
@@ -256,6 +258,13 @@ export class SteamWeb {
     };
   }
 
+  private validateSessionExpiry(session: SteamWebSession): void {
+    const expiresAt = session.steamLoginSecure.expires;
+    if (expiresAt !== 0 && expiresAt <= Date.now()) {
+      throw new SteamWebError(ERRORS.TOKEN_EXPIRED);
+    }
+  }
+
   private requireProfileUrl(...segments: string[]): string {
     if (!this.steamWebSession.steamid) {
       throw new SteamWebError(ERRORS.NOT_LOGGEDIN);
@@ -353,10 +362,12 @@ export class SteamWeb {
       return null;
     }
 
-    const expires = /(?:^|;\s*)expires=([^;]+)/i.exec(cookie.raw)?.[1];
+    const expiresValue = /(?:^|;\s*)expires=([^;]+)/i.exec(cookie.raw)?.[1];
+    const expiresAt = expiresValue ? Date.parse(expiresValue) : Number.NaN;
+
     return {
       steamLoginSecure: cookie.value,
-      expires: expires && !Number.isNaN(Date.parse(expires)) ? Date.parse(expires) : 0,
+      expires: Number.isNaN(expiresAt) ? 0 : expiresAt,
     };
   }
 
